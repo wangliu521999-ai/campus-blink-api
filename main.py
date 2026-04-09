@@ -4,8 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
 import time
 import uuid
+import asyncio
 
-app = FastAPI(title="Campus Blink API v1.3")
+app = FastAPI(title="Campus Blink API v1.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,15 +29,13 @@ class Bubble(BaseModel):
 
 bubbles_db = {}
 active_connections: Dict[str, List[WebSocket]] = {}
-
-# ================= 🚀 新增：聊天历史记忆库 =================
 chat_history_db: Dict[str, List[str]] = {}
 user_last_post_time: Dict[str, float] = {}
 COOLDOWN_SECONDS = 10 
 
 @app.get("/")
 def read_root():
-    return {"status": "success", "message": "v1.3 拥有记忆的聊天室已上线！"}
+    return {"status": "success", "message": "v1.4 拥有撤销机制的服务器已上线！"}
 
 @app.post("/api/bubbles")
 def create_bubble(bubble: Bubble):
@@ -61,7 +60,6 @@ def create_bubble(bubble: Bubble):
     
     bubbles_db[bubble_id] = bubble_data
     
-    # 🧹 清理过期气泡时，同步清理它的聊天记忆，防止内存爆炸
     expired_bubbles = [bid for bid, bdata in bubbles_db.items() if current_time > bdata["expire_timestamp"]]
     for bid in expired_bubbles:
         del bubbles_db[bid]
@@ -74,28 +72,49 @@ def create_bubble(bubble: Bubble):
 def get_bubbles():
     return {"status": "success", "data": list(bubbles_db.values())}
 
+# ================= 🚀 新增：撤销/删除气泡接口 =================
+@app.delete("/api/bubbles/{bubble_id}")
+async def delete_bubble(bubble_id: str, user_id: str):
+    if bubble_id not in bubbles_db:
+        raise HTTPException(status_code=404, detail="该气泡已经消失啦~")
+        
+    # 鉴权：只有发起人自己才能删除
+    if bubbles_db[bubble_id]["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="你没有权限撤销别人的气泡哦！")
+
+    # 1. 强制通知聊天室里的所有人：“局散了”
+    if bubble_id in active_connections:
+        for ws in active_connections[bubble_id]:
+            try:
+                await ws.send_text("⚠️ 发起人已撤销该闪现，活动取消/聊天室解散。")
+            except:
+                pass
+
+    # 2. 从数据库和记忆库中彻底抹除
+    del bubbles_db[bubble_id]
+    if bubble_id in chat_history_db:
+        del chat_history_db[bubble_id]
+        
+    return {"status": "success", "message": "撤销成功"}
+
 @app.websocket("/ws/{bubble_id}")
 async def websocket_endpoint(websocket: WebSocket, bubble_id: str):
     await websocket.accept()
     if bubble_id not in active_connections:
         active_connections[bubble_id] = []
     
-    # 🚀 如果这个房间还没创建记忆库，初始化一个
     if bubble_id not in chat_history_db:
         chat_history_db[bubble_id] = []
 
     active_connections[bubble_id].append(websocket)
     
-    # 🚀 极其关键：新用户连进来时，立刻把这个房间所有的历史消息发给他！
     for msg in chat_history_db[bubble_id]:
         await websocket.send_text(msg)
 
     try:
         while True:
             data = await websocket.receive_text()
-            # 🚀 收到新消息，存入记忆库
             chat_history_db[bubble_id].append(data)
-            # 广播给所有人
             for connection in active_connections[bubble_id]:
                 await connection.send_text(data)
     except WebSocketDisconnect:
