@@ -1,11 +1,12 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
 import time
 import uuid
+import json
 
-app = FastAPI(title="Campus Blink API v1.5")
+app = FastAPI(title="Campus Blink API v1.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,6 +16,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==========================================
+# 🚀 核心安全防线：敏感词库
+# ==========================================
+SENSITIVE_WORDS = ["诈骗", "兼职", "加微信", "赌博", "贷款", "色情", "代写"]
+
+def check_sensitive(text: str) -> bool:
+    for word in SENSITIVE_WORDS:
+        if word in text:
+            return True
+    return False
+
 class Bubble(BaseModel):
     user_id: str
     lat: float
@@ -23,7 +35,7 @@ class Bubble(BaseModel):
     text: str
     expire_minutes: int
     category: str = "chat"
-    max_people: int = 10 # 🚀 新增：人数上限
+    max_people: int = 10 
     start_time: Optional[str] = None
     end_time: Optional[str] = None
 
@@ -33,11 +45,15 @@ chat_history_db: Dict[str, List[str]] = {}
 
 @app.post("/api/bubbles")
 def create_bubble(bubble: Bubble):
+    # 🚀 敏感词拦截
+    if check_sensitive(bubble.text) or check_sensitive(bubble.icon):
+        raise HTTPException(status_code=400, detail="内容包含违规词汇，请文明发布！")
+
     bubble_id = str(uuid.uuid4())
     bubble_data = bubble.dict()
     bubble_data["id"] = bubble_id
     bubble_data["expire_timestamp"] = time.time() + bubble.expire_minutes * 60
-    bubble_data["current_people"] = 0 # 初始人数
+    bubble_data["current_people"] = 0 
     
     bubbles_db[bubble_id] = bubble_data
     return {"status": "success", "data": bubble_data}
@@ -52,7 +68,6 @@ def get_bubbles(category: Optional[str] = None):
         if bid in chat_history_db: del chat_history_db[bid]
 
     all_bubbles = list(bubbles_db.values())
-    # 🚀 优化：增加后端分类筛选逻辑
     if category and category != "all":
         all_bubbles = [b for b in all_bubbles if b["category"] == category]
         
@@ -63,7 +78,8 @@ async def delete_bubble(bubble_id: str, user_id: str):
     if bubble_id in bubbles_db and bubbles_db[bubble_id]["user_id"] == user_id:
         if bubble_id in active_connections:
             for ws in active_connections[bubble_id]:
-                await ws.send_text("⚠️ 气泡已由发起人撤销。")
+                # 🚀 格式化系统消息
+                await ws.send_text(json.dumps({"userId": "system", "text": "⚠️ 气泡已由发起人撤销。"}))
         del bubbles_db[bubble_id]
         return {"status": "success"}
     raise HTTPException(status_code=403, detail="无权操作")
@@ -72,10 +88,9 @@ async def delete_bubble(bubble_id: str, user_id: str):
 async def websocket_endpoint(websocket: WebSocket, bubble_id: str):
     await websocket.accept()
     
-    # 🚀 核心逻辑：检查人数上限
     bubble = bubbles_db.get(bubble_id)
     if not bubble:
-        await websocket.send_text("⚠️ 气泡已失效")
+        await websocket.send_text(json.dumps({"userId": "system", "text": "⚠️ 气泡已失效"}))
         await websocket.close()
         return
         
@@ -83,7 +98,7 @@ async def websocket_endpoint(websocket: WebSocket, bubble_id: str):
         active_connections[bubble_id] = []
     
     if len(active_connections[bubble_id]) >= bubble["max_people"]:
-        await websocket.send_text("❌ 房间已满员，无法进入聊天")
+        await websocket.send_text(json.dumps({"userId": "system", "text": "❌ 房间已满员，无法进入聊天"}))
         await websocket.close()
         return
 
@@ -92,12 +107,32 @@ async def websocket_endpoint(websocket: WebSocket, bubble_id: str):
     
     if bubble_id not in chat_history_db:
         chat_history_db[bubble_id] = []
+        
+    # 推送历史消息
     for msg in chat_history_db[bubble_id]:
         await websocket.send_text(msg)
+
+    # 🚀 进群欢迎系统消息！
+    welcome_msg = json.dumps({"userId": "system", "text": "👋 一位校友加入了闪现..."})
+    chat_history_db[bubble_id].append(welcome_msg)
+    for connection in active_connections[bubble_id]:
+        await connection.send_text(welcome_msg)
 
     try:
         while True:
             data = await websocket.receive_text()
+            
+            # 解析前端发来的 JSON，检查敏感词
+            try:
+                msg_obj = json.loads(data)
+                user_text = msg_obj.get("text", "")
+            except:
+                user_text = data
+                
+            if check_sensitive(user_text):
+                await websocket.send_text(json.dumps({"userId": "system", "text": "⚠️ 消息违规，发送失败"}))
+                continue
+
             chat_history_db[bubble_id].append(data)
             for connection in active_connections[bubble_id]:
                 await connection.send_text(data)
