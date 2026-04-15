@@ -8,7 +8,7 @@ import json
 import sqlite3
 from contextlib import closing
 
-app = FastAPI(title="Campus Blink API v1.7 - DB Edition")
+app = FastAPI(title="Campus Blink API v1.7.1 - DB Realtime Edition")
 
 app.add_middleware(
     CORSMiddleware,
@@ -113,7 +113,18 @@ def get_bubbles(category: Optional[str] = None):
             
         conn.row_factory = sqlite3.Row
         rows = conn.execute(query, params).fetchall()
-        return {"status": "success", "data": [dict(row) for row in rows]}
+        
+        # ==========================================
+        # 🚀 核心修复：动态获取真实的实时在线人数
+        # ==========================================
+        bubble_list = []
+        for row in rows:
+            b_dict = dict(row)
+            # 从内存中查当前有几条 WebSocket 连接
+            b_dict["current_people"] = len(active_connections.get(b_dict["id"], []))
+            bubble_list.append(b_dict)
+            
+        return {"status": "success", "data": bubble_list}
 
 @app.delete("/api/bubbles/{bubble_id}")
 async def delete_bubble(bubble_id: str, user_id: str):
